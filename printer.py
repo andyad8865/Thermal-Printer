@@ -1,168 +1,127 @@
-#!/usr/bin/python
-
 import sys
+import io
+import time
+import os
+import textwrap
 from Adafruit_Thermal import *
 
+# 1. Initialize Hardware (9V / 9600 Baud / FW 2.67)
 printer = Adafruit_Thermal("/dev/serial0", 9600, timeout=5)
+printer.firmwareVersion = 267
+printer.begin(100) # HeatTime 100 via begin() for 9V
 
-printer.setDefault()
-
-def has_paper():
-    # Check if the printer has paper.  This only works if the RX line is connected
-    # on your board (but BE CAREFUL as mentioned above this RX line is 5V!)
-    if printer.hasPaper():
-        print("Printer has paper!")
-    else:
-        print("Printer might be out of paper, or RX is disconnected!")
-
-def print_bold(x):
+def run_thermal_job(input_data, raw_mods_string):
     printer.wake()
-    printer.boldOn()
-    printer.println(x)
-    printer.boldOff()
+    printer.reset() 
+    mods = [m.strip().lower() for m in raw_mods_string.split(",")]
 
-def print_underline(x):
-    printer.wake()
-    printer.underlineOn()
-    printer.println(x)
-    printer.underlineOff()
-
-def print_underline_thick(x):
-    printer.wake()
-    printer.underlineOn(2)
-    printer.println(x)
-    printer.underlineOff()
-
-def print_inverted(x):
-    printer.wake()
-    printer.inverseOn()
-    printer.println(x)
-    printer.inverseOff()
-
-def print_double_height(x):
-    printer.wake()
-    printer.doubleHeightOn()
-    printer.println(x)
-    printer.doubleHeightOff()
-
-def print_double_width(x):
-    printer.wake()
-    printer.doubleWidthOn()
-    printer.println(x)
-    printer.doubleWidthOff()
-
-def print_medium(x):
-    printer.wake()
-    printer.setSize('M')
-    printer.println(x)
-    printer.setSize('S')
-
-def print_large(x):
-    printer.wake()
-    printer.setSize('L')
-    printer.println(x)
-    printer.setSize('S')
-
-
-def options (option, info):
-    option = int(option)
-    #Paper Check
-    if option == 1:
-        has_paper()
-    
-    #Paper Feed
-    elif option == 2:
-        if info == "":
-            print ("No Number Detected, Please use a whole number between 1 and 255, Please use this format: printer.py 2 'Your Text Here'")
-        else:
-            try:
-                printer.feed(int(info))
-            except ValueError:
-                print("No valid Number Detected, Please use a whole humber between 1 and 255")
-    
-    #Print Standard            
-    elif option == 3:
-        if info == "":
-            print ("No Information Detected, Please use this format: printer.py 3 'Your Text Here'")
-        else:
-            printer.wake()
-            printer.println(info)
-    
-    #Print Bold        
-    elif option == 4:
-        if info == "":
-            print ("No Information Detected, Please use this format: printer.py 4 'Your Text Here'")
-        else:
-            print_bold(info)
-    
-    #Print Underline     
-    elif option == 5:
-        if info == "":
-            print ("No Information Detected, Please use this format: printer.py 5 'Your Text Here'")
-        else:
-            print_underline(info)
-    
-    #Print Thick Underline        
-    elif option == 6:
-        if info == "":
-            print ("No Information Detected, Please use this format: printer.py 6 'Your Text Here'")
-        else:
-            print_underline_thick(info)
-    
-    #Print Inverted (White Text On Black Background)
-    elif option == 7:
-        if info == "":
-            print ("No Information Detected, Please use this format: printer.py 7 'Your Text Here'")
-        else:
-            print_inverted(info)
-            
-    #Print Double Height        
-    elif option == 8:
-        if info == "":
-            print ("No Information Detected, Please use this format: printer.py 8 'Your Text Here'")
-        else:
-            print_double_height(info)
-    
-    #Print Double Width
-    elif option == 9:
-        if info == "":
-            print ("No Information Detected, Please use this format: printer.py 9 'Your Text Here'")
-        else:
-            print_double_width(info)
-    
-    #Print Help Message On Console
-    elif option == 'h' or 'help':
-        print ("Welcome To The Help Page, Below Is A List Of All The Supported Commands")
-        print ("#######################################################################")
+    # --- BRANCH 1: DIAGNOSTICS ---
+    if "test" in mods:
+        printer.writeBytes(18, 84) # DC2 T (Hard Test)
+        time.sleep(5.0)
+        os._exit(0)
         
+    elif "test_all" in mods:
+        # (Retail barcode test suite)
+        test_suite = [("UPC-A",65,"075678164125"),("UPC-E",66,"01234500005"),("EAN13",67,"4006381333931"),("CODE39",69,"ABC-123"),("C128",73,"V128")]
+        for name, bc_id, data in test_suite:
+            printer.setSize('S')
+            printer.println(f"TYPE: {name}")
+            printer.writeBytes(29, 72, 2)
+            printer.writeBytes(29, 107, bc_id)
+            printer.writeBytes(len(data))
+            for char in data: printer.writeBytes(ord(char))
+            printer.feed(2); time.sleep(1.5)
+        os._exit(0)
+
+    # --- BRANCH 2: IMAGES ---
+    elif "img" in mods:
+        try:
+            from PIL import Image
+            import requests
+            printer.writeBytes(27, 55, 11, 185, 250)
+            printer.writeBytes(27, 51, 100) # Max spacing for image
+            if input_data.startswith('http'):
+                res = requests.get(input_data, timeout=10)
+                img_obj = Image.open(io.BytesIO(res.content))
+            else:
+                img_obj = Image.open(input_data)
+            
+            scale = 100
+            for m in mods:
+                if m.startswith('s') and m[1:].isdigit(): scale = int(m[1:])
+            
+            tw = max(8, min(384, (int(384 * (scale / 100.0)) // 8) * 8))
+            img_obj = img_obj.resize((tw, int(img_obj.height * (tw/img_obj.width))), Image.Resampling.NEAREST).convert('1')
+            printer.printImage(img_obj, False)
+            printer.feed(2); time.sleep(3)
+        finally:
+            os._exit(0)
+
+    # --- BRANCH 3: BARCODES ---
+    elif any(x in mods for x in ["upca","upce","ean13","ean8","code39","itf","cobar","code93","c128"]):
+        printer.writeBytes(27, 51, 30) # Reset spacing
+        bc_map = {"upca":65,"upce":66,"ean13":67,"ean8":68,"code39":69,"itf":70,"cobar":71,"code93":72,"c128":73}
+        bc_type = 69
+        for mod in mods:
+            if mod in bc_map: bc_type = bc_map[mod]
+            if mod.startswith('h') and mod[1:].isdigit(): printer.writeBytes(29, 104, int(mod[1:]))
+            if mod.startswith('w') and mod[1:].isdigit(): printer.writeBytes(29, 119, int(mod[1:]))
+        
+        data = input_data.upper() if "code39" in mods else input_data
+        printer.writeBytes(29, 72, 2)
+        printer.writeBytes(29, 107, bc_type)
+        printer.writeBytes(len(data))
+        for char in data: printer.writeBytes(ord(char))
+        printer.writeBytes(27, 74, 60); time.sleep(1.5)
+        os._exit(0)
+
+    # --- BRANCH 4: THE COMPLETE TEXT WRAPPER ---
     else:
-        print("Invalid Option - Please Select a Number Between 1 and 9 OR Pass 'h' or 'help' for all commands")
+        # 1. CHARACTER LIMITS (Word Wrap)
+        char_limit = 32
+        if "large" in mods: 
+            char_limit = 16
+            printer.setSize('L')
+        elif "med" in mods: 
+            char_limit = 21
+            printer.setSize('M')
+        else: 
+            printer.setSize('S')
 
-########################################################
-################## Script Starts Here ##################
-########################################################
-printer.setDefault()
+        # 2. FORMATTING FUNCTIONS SUPPORTED BY LIB
+        if "b" in mods: printer.boldOn()               # printer.boldOn()
+        if "inv" in mods: printer.inverseOn()          # printer.inverseOn()
+        if "up" in mods: printer.upsideDownOn()        # printer.upsideDownOn()
+        if "dh" in mods: printer.doubleHeightOn()      # printer.doubleHeightOn()
+        if "dw" in mods: printer.doubleWidthOn()        # printer.doubleWidthOn()
+        
+        # Underlines
+        if "ult" in mods: printer.underlineOn(2)       # printer.underlineOn(2)
+        elif "ul" in mods: printer.underlineOn(1)       # printer.underlineOn(1)
+        
+        # Justification
+        if "jc" in mods: printer.justify('C')          # printer.justify('C')
+        elif "jr" in mods: printer.justify('R')        # printer.justify('R')
+        else: printer.justify('L')                     # printer.justify('L')
 
-try:
-    option1 = sys.argv[1]
-except ValueError: 
-    print("No valid Number Detected, Please Select a Number Between 1 and 9") 
-    quit()
+        # 3. PRINT WRAPPED LINES
+        wrapped = textwrap.wrap(input_data, width=char_limit)
+        for line in wrapped:
+            printer.println(line)
 
-if len(sys.argv[1:]) < 2:
-    option2 = ""
-else:
-    option2 = sys.argv[2]
-    
-options(option1, option2)
+        # 4. DYNAMIC FEED
+        for m in mods:
+            if m.startswith('f') and m[1:].isdigit():
+                num = int(m[1:])
+                printer.feed(num)
+                time.sleep(num * 0.2)
+                break 
 
-#options(7, "Hello World!")
-#options(2, 1)
+        printer.reset()
+        printer.sleep()
+        os._exit(0)
 
-if sys.argv[1] == '1':
-  print("")
-else:
-  printer.feed(0)
-
-
-printer.sleep()
+if __name__ == "__main__":
+    if len(sys.argv) >= 3:
+        run_thermal_job(sys.argv[1], sys.argv[2])
